@@ -779,6 +779,15 @@ impl Platform for MacPlatform {
                     panel.setCanChooseDirectories_(options.directories.to_objc());
                     panel.setCanChooseFiles_(options.files.to_objc());
                     panel.setAllowsMultipleSelection_(options.multiple.to_objc());
+                    if let Some(extensions) = options.allowed_extensions.as_ref() {
+                        let types = extensions
+                            .iter()
+                            .map(|extension| ns_string(extension))
+                            .collect::<Vec<_>>();
+                        let types = NSArray::arrayWithObjects(nil, &types);
+                        let _: () = msg_send![panel, setAllowedFileTypes: types];
+                        let _: () = msg_send![panel, setAllowsOtherFileTypes: NO];
+                    }
 
                     panel.setCanCreateDirectories(true.to_objc());
                     panel.setResolvesAliases_(false.to_objc());

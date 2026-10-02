@@ -7,6 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use anyhow::Context as _;
 use ashpd::WindowIdentifier;
 use calloop::{
     EventLoop, LoopHandle,
@@ -669,19 +670,13 @@ impl Drop for WaylandClient {
 
 const WL_DATA_DEVICE_MANAGER_VERSION: u32 = 3;
 
-fn wl_seat_version(version: u32) -> u32 {
+fn wl_seat_version(version: u32) -> Option<u32> {
     // We rely on the wl_pointer.frame event
     const WL_SEAT_MIN_VERSION: u32 = 5;
     const WL_SEAT_MAX_VERSION: u32 = 9;
 
-    if version < WL_SEAT_MIN_VERSION {
-        panic!(
-            "wl_seat below required version: {} < {}",
-            version, WL_SEAT_MIN_VERSION
-        );
-    }
-
-    version.clamp(WL_SEAT_MIN_VERSION, WL_SEAT_MAX_VERSION)
+    (version >= WL_SEAT_MIN_VERSION)
+        .then(|| version.clamp(WL_SEAT_MIN_VERSION, WL_SEAT_MAX_VERSION))
 }
 
 fn wl_output_version(version: u32) -> u32 {
@@ -698,12 +693,20 @@ fn wl_output_version(version: u32) -> u32 {
     version.clamp(WL_OUTPUT_MIN_VERSION, WL_OUTPUT_MAX_VERSION)
 }
 
-impl WaylandClient {
-    pub(crate) fn new() -> Self {
-        let startup_activation_token = take_startup_activation_token_from_environment();
-        let conn = Connection::connect_to_env().unwrap();
+fn require_wl_seat<T>(seat: Option<T>) -> anyhow::Result<T> {
+    seat.ok_or_else(|| {
+        anyhow::anyhow!("Wayland compositor did not advertise the required wl_seat global")
+    })
+}
 
-        let (globals, event_queue) = registry_queue_init::<WaylandClientStatePtr>(&conn).unwrap();
+impl WaylandClient {
+    pub(crate) fn new() -> anyhow::Result<Self> {
+        let startup_activation_token = take_startup_activation_token_from_environment();
+        let conn =
+            Connection::connect_to_env().context("failed to connect to Wayland compositor")?;
+
+        let (globals, event_queue) = registry_queue_init::<WaylandClientStatePtr>(&conn)
+            .context("failed to initialise Wayland registry")?;
         let qh = event_queue.handle();
 
         let mut seat: Option<wl_seat::WlSeat> = None;
@@ -715,12 +718,14 @@ impl WaylandClient {
             for global in list {
                 match &global.interface[..] {
                     "wl_seat" => {
-                        seat = Some(globals.registry().bind::<wl_seat::WlSeat, _, _>(
-                            global.name,
-                            wl_seat_version(global.version),
-                            &qh,
-                            (),
-                        ));
+                        if let Some(version) = wl_seat_version(global.version) {
+                            seat = Some(globals.registry().bind::<wl_seat::WlSeat, _, _>(
+                                global.name,
+                                version,
+                                &qh,
+                                (),
+                            ));
+                        }
                     }
                     "wl_output" => {
                         let output = globals.registry().bind::<wl_output::WlOutput, _, _>(
@@ -737,7 +742,8 @@ impl WaylandClient {
             }
         });
 
-        let event_loop = EventLoop::<WaylandClientStatePtr>::try_new().unwrap();
+        let event_loop = EventLoop::<WaylandClientStatePtr>::try_new()
+            .context("failed to create Wayland event loop")?;
 
         let (common, main_receiver, wake_receiver) = LinuxCommon::new(event_loop.get_signal());
 
@@ -757,7 +763,9 @@ impl WaylandClient {
                     }
                 }
             })
-            .unwrap();
+            .map_err(|error| {
+                anyhow::anyhow!("failed to register Wayland main receiver: {error}")
+            })?;
 
         handle
             .insert_source(
@@ -768,12 +776,14 @@ impl WaylandClient {
                     }
                 },
             )
-            .unwrap();
+            .map_err(|error| {
+                anyhow::anyhow!("failed to register Wayland wake receiver: {error}")
+            })?;
 
         let compositor_gpu = detect_compositor_gpu();
         let gpu_context = Rc::new(RefCell::new(None));
 
-        let seat = seat.unwrap();
+        let seat = require_wl_seat(seat)?;
         let globals = Globals::new(
             globals,
             common.foreground_executor.clone(),
@@ -834,7 +844,9 @@ impl WaylandClient {
                     }
                 }
             })
-            .unwrap();
+            .map_err(|error| {
+                anyhow::anyhow!("failed to register Wayland desktop portal event source: {error}")
+            })?;
 
         let state = Rc::new(RefCell::new(WaylandClientState {
             serial_tracker: SerialTracker::new(),
@@ -914,9 +926,11 @@ impl WaylandClient {
 
         WaylandSource::new(conn, event_queue)
             .insert(handle)
-            .unwrap();
+            .map_err(|error| {
+                anyhow::anyhow!("failed to register Wayland connection event source: {error}")
+            })?;
 
-        Self(state)
+        Ok(Self(state))
     }
 }
 
@@ -1321,19 +1335,19 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for WaylandClientStat
                 version,
             } => match &interface[..] {
                 "wl_seat" => {
-                    if let Some(wl_pointer) = state.wl_pointer.take() {
-                        wl_pointer.release();
+                    if let Some(version) = wl_seat_version(version) {
+                        if let Some(wl_pointer) = state.wl_pointer.take() {
+                            wl_pointer.release();
+                        }
+                        if let Some(wl_keyboard) = state.wl_keyboard.take() {
+                            wl_keyboard.release();
+                        }
+                        state.wl_seat.release();
+                        state.wl_seat =
+                            registry.bind::<wl_seat::WlSeat, _, _>(name, version, qh, ());
+                    } else {
+                        log::warn!("ignoring wl_seat global below required version 5: {version}");
                     }
-                    if let Some(wl_keyboard) = state.wl_keyboard.take() {
-                        wl_keyboard.release();
-                    }
-                    state.wl_seat.release();
-                    state.wl_seat = registry.bind::<wl_seat::WlSeat, _, _>(
-                        name,
-                        wl_seat_version(version),
-                        qh,
-                        (),
-                    );
                 }
                 "wl_output" => {
                     let output = registry.bind::<wl_output::WlOutput, _, _>(
@@ -2857,6 +2871,22 @@ mod tests {
         fn commit_ime_state(&self) {
             self.commit_count.set(self.commit_count.get() + 1);
         }
+    }
+
+    #[test]
+    fn requires_a_wayland_seat_before_client_initialisation() {
+        assert_eq!(require_wl_seat(Some(42_u8)).unwrap(), 42);
+        assert_eq!(
+            require_wl_seat::<u8>(None).unwrap_err().to_string(),
+            "Wayland compositor did not advertise the required wl_seat global"
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_wayland_seats_without_panicking() {
+        assert_eq!(wl_seat_version(4), None);
+        assert_eq!(wl_seat_version(5), Some(5));
+        assert_eq!(wl_seat_version(12), Some(9));
     }
 
     #[test]

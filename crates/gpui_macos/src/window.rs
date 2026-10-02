@@ -1231,6 +1231,30 @@ impl PlatformWindow for MacWindow {
         self.0.as_ref().lock().content_size()
     }
 
+    fn can_set_origin(&self) -> bool {
+        true
+    }
+
+    fn set_origin(&self, origin: Point<Pixels>) {
+        // Release the state lock first: moving fires `windowDidMove`, which
+        // locks it again.
+        let window = self.0.lock().native_window;
+        unsafe {
+            let screen = NSWindow::screen(window);
+            if screen == nil {
+                return;
+            }
+            // Invert `bounds`: top-left origin relative to the window's screen.
+            let screen_frame = NSScreen::frame(screen);
+            let frame = NSWindow::frame(window);
+            let flipped_y = origin.y.as_f32() as f64 - screen_frame.origin.y;
+            let _: () = msg_send![window, setFrameOrigin: NSPoint::new(
+                origin.x.as_f32() as f64 + screen_frame.origin.x,
+                screen_frame.size.height - flipped_y - frame.size.height,
+            )];
+        }
+    }
+
     fn resize(&mut self, size: Size<Pixels>) {
         let this = self.0.lock();
         let window = this.native_window;

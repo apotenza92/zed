@@ -2441,6 +2441,17 @@ impl Window {
         self.rendered_frame.scene.quads.clone()
     }
 
+    /// Moves the window's frame origin, in the coordinates of [`Self::bounds`].
+    /// A no-op where the platform cannot position windows.
+    pub fn set_origin(&self, origin: Point<Pixels>) {
+        self.platform_window.set_origin(origin);
+    }
+
+    /// Whether [`Self::set_origin`] can move this window (not on Wayland).
+    pub fn can_set_origin(&self) -> bool {
+        self.platform_window.can_set_origin()
+    }
+
     /// Set the content size of the window.
     pub fn resize(&mut self, size: Size<Pixels>) {
         self.platform_window.resize(size);
@@ -4187,6 +4198,30 @@ impl Window {
         font_size: Pixels,
         color: Hsla,
     ) -> Result<()> {
+        self.paint_glyph_transformed(
+            origin,
+            font_id,
+            glyph_id,
+            font_size,
+            color,
+            TransformationMatrix::unit(),
+        )
+    }
+
+    /// Paints a monochrome glyph with a device-pixel transformation.
+    ///
+    /// The transformation affects the rendered sprite and clipping only. It does not affect text
+    /// shaping, layout, or hit testing. Callers should normally use
+    /// [`ShapedLine::paint_transformed`](crate::ShapedLine::paint_transformed).
+    pub fn paint_glyph_transformed(
+        &mut self,
+        origin: Point<Pixels>,
+        font_id: FontId,
+        glyph_id: GlyphId,
+        font_size: Pixels,
+        color: Hsla,
+        transformation: TransformationMatrix,
+    ) -> Result<()> {
         self.invalidator.debug_assert_paint();
 
         let element_opacity = self.element_opacity();
@@ -4240,7 +4275,7 @@ impl Window {
                     content_mask,
                     color: color.opacity(element_opacity),
                     tile,
-                    transformation: TransformationMatrix::unit(),
+                    transformation,
                 });
             } else {
                 self.next_frame.scene.insert_primitive(MonochromeSprite {
@@ -4250,7 +4285,7 @@ impl Window {
                     content_mask,
                     color: color.opacity(element_opacity),
                     tile,
-                    transformation: TransformationMatrix::unit(),
+                    transformation,
                 });
             }
         }
@@ -4290,6 +4325,27 @@ impl Window {
         font_id: FontId,
         glyph_id: GlyphId,
         font_size: Pixels,
+    ) -> Result<()> {
+        self.paint_emoji_transformed(
+            origin,
+            font_id,
+            glyph_id,
+            font_size,
+            TransformationMatrix::unit(),
+        )
+    }
+
+    /// Paints an emoji glyph with a device-pixel transformation.
+    ///
+    /// The transformation affects the rendered sprite and clipping only. It does not affect text
+    /// shaping, layout, or hit testing.
+    pub fn paint_emoji_transformed(
+        &mut self,
+        origin: Point<Pixels>,
+        font_id: FontId,
+        glyph_id: GlyphId,
+        font_size: Pixels,
+        transformation: TransformationMatrix,
     ) -> Result<()> {
         self.invalidator.debug_assert_paint();
 
@@ -4333,6 +4389,7 @@ impl Window {
                 content_mask,
                 tile,
                 opacity,
+                transformation,
             });
         }
         Ok(())
@@ -4420,6 +4477,31 @@ impl Window {
         frame_index: usize,
         grayscale: bool,
     ) -> Result<()> {
+        self.paint_image_transformed(
+            bounds,
+            image_bounds,
+            corner_radii,
+            data,
+            frame_index,
+            grayscale,
+            TransformationMatrix::unit(),
+        )
+    }
+
+    /// Paints an image with a device-pixel transformation.
+    ///
+    /// The transformation affects the rendered sprite and clipping only. The source tile is still
+    /// selected from the untransformed `bounds` and `image_bounds`, preserving crop coordinates.
+    pub fn paint_image_transformed(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        image_bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        data: Arc<RenderImage>,
+        frame_index: usize,
+        grayscale: bool,
+        transformation: TransformationMatrix,
+    ) -> Result<()> {
         self.invalidator.debug_assert_paint();
 
         let visible_bounds = bounds.intersect(&image_bounds);
@@ -4505,6 +4587,7 @@ impl Window {
             corner_radii,
             tile: sub_tile,
             opacity,
+            transformation,
         });
         Ok(())
     }

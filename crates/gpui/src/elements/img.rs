@@ -802,7 +802,9 @@ impl From<image::ImageError> for ImageCacheError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ParentElement as _, TestAppContext, canvas, div, point, px, size};
+    use crate::{
+        ParentElement as _, TestAppContext, TransformationMatrix, canvas, div, point, px, size,
+    };
     use image::{Frame, ImageBuffer, Rgba};
 
     const TEST_IMG_ID: &str = "test-img";
@@ -896,6 +898,47 @@ mod tests {
             ),
             (50, 0, 100, 100),
         );
+    }
+
+    #[gpui::test]
+    fn transformed_image_retains_crop_tile_and_records_matrix(cx: &mut TestAppContext) {
+        let window = cx.add_empty_window();
+        let image = test_image_with_size(200, 100);
+        let transformation = TransformationMatrix {
+            rotation_scale: [[0., -1.], [1., 0.]],
+            translation: [140., 20.],
+        };
+        window.draw(point(px(0.), px(0.)), size(px(200.), px(200.)), |_, _| {
+            canvas(
+                |_, _, _| (),
+                move |_, _, window, _| {
+                    window
+                        .paint_image_transformed(
+                            Bounds::new(point(px(25.), px(0.)), size(px(50.), px(100.))),
+                            Bounds::new(point(px(0.), px(0.)), size(px(100.), px(100.))),
+                            Default::default(),
+                            image.clone(),
+                            0,
+                            false,
+                            transformation,
+                        )
+                        .unwrap();
+                },
+            )
+            .into_any_element()
+        });
+
+        window.update(|window, _| {
+            let sprite = window
+                .rendered_frame
+                .scene
+                .polychrome_sprites
+                .last()
+                .expect("transformed image should paint a sprite");
+            assert_eq!(sprite.transformation, transformation);
+            assert_eq!(sprite.tile.bounds.size.width.0, 100);
+            assert_eq!(sprite.tile.bounds.size.height.0, 100);
+        });
     }
 
     #[gpui::test]

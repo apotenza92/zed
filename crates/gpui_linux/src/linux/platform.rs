@@ -414,15 +414,29 @@ impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P> {
                     "Open File"
                 };
 
-                let request = match ashpd::desktop::file_chooser::OpenFileRequest::default()
+                let mut request = ashpd::desktop::file_chooser::OpenFileRequest::default()
                     .identifier(identifier.await)
                     .modal(true)
                     .title(title)
                     .accept_label(options.prompt.as_ref().map(gpui::SharedString::as_str))
                     .multiple(options.multiple)
-                    .directory(options.directories)
-                    .send()
-                    .await
+                    .directory(options.directories);
+                if let Some(extensions) = options.allowed_extensions.as_ref() {
+                    let label = format!(
+                        "{} files",
+                        extensions
+                            .iter()
+                            .map(|extension| extension.to_uppercase())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                    let mut filter = ashpd::desktop::file_chooser::FileFilter::new(&label);
+                    for extension in extensions {
+                        filter = filter.glob(&format!("*.{extension}"));
+                    }
+                    request = request.filter(filter);
+                }
+                let request = match request.send().await
                 {
                     Ok(request) => request,
                     Err(err) => {

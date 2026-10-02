@@ -39,9 +39,22 @@ pub fn current_platform(headless: bool) -> Rc<dyn gpui::Platform> {
 
     match gpui::guess_compositor() {
         #[cfg(feature = "wayland")]
-        "Wayland" => Rc::new(LinuxPlatform {
-            inner: WaylandClient::new(),
-        }),
+        "Wayland" => match WaylandClient::new() {
+            Ok(client) => Rc::new(LinuxPlatform { inner: client }),
+            Err(error) => {
+                #[cfg(feature = "x11")]
+                {
+                    log::warn!("Wayland initialisation failed ({error:#}); falling back to X11");
+                    Rc::new(LinuxPlatform {
+                        inner: X11Client::new()
+                            .context("Failed to initialize X11 client after Wayland failure.")
+                            .unwrap(),
+                    })
+                }
+                #[cfg(not(feature = "x11"))]
+                panic!("Failed to initialize Wayland client: {error:#}");
+            }
+        },
 
         #[cfg(feature = "x11")]
         "X11" => Rc::new(LinuxPlatform {

@@ -630,6 +630,45 @@ impl PlatformWindow for WindowsWindow {
         self.state.content_size()
     }
 
+    fn can_set_origin(&self) -> bool {
+        true
+    }
+
+    fn set_origin(&self, origin: Point<Pixels>) {
+        let hwnd = self.0.hwnd;
+        let scale_factor = self.scale_factor();
+        // `bounds` reports the client origin; SetWindowPos places the outer
+        // window, whose invisible resize borders sit outside the client area.
+        // Move by the requested change so the reported origin lands on `origin`.
+        let current = self.bounds().origin.scale(scale_factor);
+        let origin = origin.scale(scale_factor);
+        let mut rect = RECT::default();
+        if unsafe { GetWindowRect(hwnd, &mut rect) }.is_err() {
+            return;
+        }
+        let x = rect.left + (origin.x.0 - current.x.0).round() as i32;
+        let y = rect.top + (origin.y.0 - current.y.0).round() as i32;
+        // Deferred like `resize`: SetWindowPos re-enters the window procedure.
+        self.0
+            .executor
+            .spawn(async move {
+                unsafe {
+                    SetWindowPos(
+                        hwnd,
+                        None,
+                        x,
+                        y,
+                        0,
+                        0,
+                        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                    )
+                    .context("unable to move window")
+                    .log_err();
+                }
+            })
+            .detach();
+    }
+
     fn resize(&mut self, size: Size<Pixels>) {
         let hwnd = self.0.hwnd;
         let bounds = gpui::bounds(self.bounds().origin, size).to_device_pixels(self.scale_factor());

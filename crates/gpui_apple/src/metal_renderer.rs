@@ -119,7 +119,9 @@ pub struct MetalRenderer {
     opaque: bool,
     command_queue: CommandQueue,
     paths_rasterization_pipeline_state: metal::RenderPipelineState,
+    opaque_multiply_paths_rasterization_pipeline_state: metal::RenderPipelineState,
     path_sprites_pipeline_state: metal::RenderPipelineState,
+    opaque_multiply_path_sprites_pipeline_state: metal::RenderPipelineState,
     shadows_pipeline_state: metal::RenderPipelineState,
     quads_pipeline_state: metal::RenderPipelineState,
     underlines_pipeline_state: metal::RenderPipelineState,
@@ -266,7 +268,19 @@ impl MetalRenderer {
             "path_rasterization_fragment",
             MTLPixelFormat::BGRA8Unorm,
             PATH_SAMPLE_COUNT,
+            false,
         );
+        let opaque_multiply_paths_rasterization_pipeline_state =
+            build_path_rasterization_pipeline_state(
+                &device,
+                &library,
+                "opaque_multiply_paths_rasterization",
+                "path_rasterization_vertex",
+                "path_rasterization_fragment",
+                MTLPixelFormat::BGRA8Unorm,
+                PATH_SAMPLE_COUNT,
+                true,
+            );
         let path_sprites_pipeline_state = build_path_sprite_pipeline_state(
             &device,
             &library,
@@ -274,6 +288,16 @@ impl MetalRenderer {
             "path_sprite_vertex",
             "path_sprite_fragment",
             MTLPixelFormat::BGRA8Unorm,
+            false,
+        );
+        let opaque_multiply_path_sprites_pipeline_state = build_path_sprite_pipeline_state(
+            &device,
+            &library,
+            "opaque_multiply_path_sprites",
+            "path_sprite_vertex",
+            "path_sprite_fragment",
+            MTLPixelFormat::BGRA8Unorm,
+            true,
         );
         let shadows_pipeline_state = build_pipeline_state(
             &device,
@@ -338,7 +362,9 @@ impl MetalRenderer {
             opaque,
             command_queue,
             paths_rasterization_pipeline_state,
+            opaque_multiply_paths_rasterization_pipeline_state,
             path_sprites_pipeline_state,
+            opaque_multiply_path_sprites_pipeline_state,
             shadows_pipeline_state,
             quads_pipeline_state,
             underlines_pipeline_state,
@@ -676,32 +702,33 @@ impl MetalRenderer {
                     self.draw_quads(range, instance_bindings, viewport_size, command_encoder)
                 }
                 PrimitiveBatch::Paths(range) => {
-                    let paths = &scene.paths[range];
-                    command_encoder.end_encoding();
+                    for paths in path_composite_runs(&scene.paths[range]) {
+                        command_encoder.end_encoding();
 
-                    let did_draw = self.draw_paths_to_intermediate(
-                        paths,
-                        writer,
-                        viewport_size,
-                        command_buffer,
-                    )?;
-
-                    command_encoder = new_command_encoder_for_texture(
-                        command_buffer,
-                        texture,
-                        viewport_size,
-                        None,
-                    );
-
-                    if did_draw {
-                        if let Err(error) = self.draw_paths_from_intermediate(
+                        let did_draw = self.draw_paths_to_intermediate(
                             paths,
                             writer,
                             viewport_size,
-                            command_encoder,
-                        ) {
-                            command_encoder.end_encoding();
-                            return Err(error);
+                            command_buffer,
+                        )?;
+
+                        command_encoder = new_command_encoder_for_texture(
+                            command_buffer,
+                            texture,
+                            viewport_size,
+                            None,
+                        );
+
+                        if did_draw {
+                            if let Err(error) = self.draw_paths_from_intermediate(
+                                paths,
+                                writer,
+                                viewport_size,
+                                command_encoder,
+                            ) {
+                                command_encoder.end_encoding();
+                                return Err(error);
+                            }
                         }
                     }
                 }
@@ -784,7 +811,11 @@ impl MetalRenderer {
         }
 
         let command_encoder = command_buffer.new_render_command_encoder(render_pass_descriptor);
-        command_encoder.set_render_pipeline_state(&self.paths_rasterization_pipeline_state);
+        command_encoder.set_render_pipeline_state(if paths[0].multiplies_over_opaque() {
+            &self.opaque_multiply_paths_rasterization_pipeline_state
+        } else {
+            &self.paths_rasterization_pipeline_state
+        });
         command_encoder.set_vertex_buffer(
             PathRasterizationInputIndex::Vertices as u64,
             Some(&vertex_instance_bindings.buffer),
@@ -909,7 +940,11 @@ impl MetalRenderer {
             .as_ref()
             .context("missing path intermediate texture")?;
 
-        command_encoder.set_render_pipeline_state(&self.path_sprites_pipeline_state);
+        command_encoder.set_render_pipeline_state(if first_path.multiplies_over_opaque() {
+            &self.opaque_multiply_path_sprites_pipeline_state
+        } else {
+            &self.path_sprites_pipeline_state
+        });
         command_encoder.set_vertex_buffer(
             SpriteInputIndex::Vertices as u64,
             Some(&self.unit_vertices),
@@ -1307,6 +1342,7 @@ fn build_path_sprite_pipeline_state(
     vertex_fn_name: &str,
     fragment_fn_name: &str,
     pixel_format: metal::MTLPixelFormat,
+    multiply_over_opaque: bool,
 ) -> metal::RenderPipelineState {
     let vertex_fn = library
         .get_function(vertex_fn_name, None)
@@ -1324,10 +1360,14 @@ fn build_path_sprite_pipeline_state(
     color_attachment.set_blending_enabled(true);
     color_attachment.set_rgb_blend_operation(metal::MTLBlendOperation::Add);
     color_attachment.set_alpha_blend_operation(metal::MTLBlendOperation::Add);
-    color_attachment.set_source_rgb_blend_factor(metal::MTLBlendFactor::One);
+    // Intermediate pixels are premultiplied. For opaque Cd, multiplying with
+    // source Cs at alpha As is Cd * (1 - As + Cs * As).
+    let (source_rgb, destination_rgb, destination_alpha) =
+        path_sprite_blend_factors(multiply_over_opaque);
+    color_attachment.set_source_rgb_blend_factor(source_rgb);
     color_attachment.set_source_alpha_blend_factor(metal::MTLBlendFactor::One);
-    color_attachment.set_destination_rgb_blend_factor(metal::MTLBlendFactor::OneMinusSourceAlpha);
-    color_attachment.set_destination_alpha_blend_factor(metal::MTLBlendFactor::One);
+    color_attachment.set_destination_rgb_blend_factor(destination_rgb);
+    color_attachment.set_destination_alpha_blend_factor(destination_alpha);
 
     device
         .new_render_pipeline_state(&descriptor)
@@ -1342,6 +1382,7 @@ fn build_path_rasterization_pipeline_state(
     fragment_fn_name: &str,
     pixel_format: metal::MTLPixelFormat,
     path_sample_count: u32,
+    union_coverage: bool,
 ) -> metal::RenderPipelineState {
     let vertex_fn = library
         .get_function(vertex_fn_name, None)
@@ -1361,8 +1402,12 @@ fn build_path_rasterization_pipeline_state(
     let color_attachment = descriptor.color_attachments().object_at(0).unwrap();
     color_attachment.set_pixel_format(pixel_format);
     color_attachment.set_blending_enabled(true);
-    color_attachment.set_rgb_blend_operation(metal::MTLBlendOperation::Add);
-    color_attachment.set_alpha_blend_operation(metal::MTLBlendOperation::Add);
+    // For a single solid-colour path, maximum premultiplied RGB and alpha
+    // unions triangle coverage instead of darkening joints/self-intersections.
+    // Metal Max ignores the blend factors below (used by ordinary Add paths).
+    let operation = path_rasterization_blend_operation(union_coverage);
+    color_attachment.set_rgb_blend_operation(operation);
+    color_attachment.set_alpha_blend_operation(operation);
     color_attachment.set_source_rgb_blend_factor(metal::MTLBlendFactor::One);
     color_attachment.set_source_alpha_blend_factor(metal::MTLBlendFactor::One);
     color_attachment.set_destination_rgb_blend_factor(metal::MTLBlendFactor::OneMinusSourceAlpha);
@@ -1622,5 +1667,268 @@ impl gpui::PlatformHeadlessRenderer for MetalHeadlessRenderer {
 
     fn sprite_atlas(&self) -> Arc<dyn gpui::PlatformAtlas> {
         self.renderer.sprite_atlas().clone()
+    }
+}
+
+// Keep normal path batches intact, but never flatten two multiply paths (or a
+// multiply path and an ordinary path) with source-over in the intermediate.
+fn path_composite_runs(
+    mut paths: &[Path<ScaledPixels>],
+) -> impl Iterator<Item = &[Path<ScaledPixels>]> {
+    std::iter::from_fn(move || {
+        let first = paths.first()?;
+        let count = if first.multiplies_over_opaque() {
+            1
+        } else {
+            paths
+                .iter()
+                .position(Path::multiplies_over_opaque)
+                .unwrap_or(paths.len())
+        };
+        let (run, remaining) = paths.split_at(count);
+        paths = remaining;
+        Some(run)
+    })
+}
+
+#[cfg(test)]
+mod opaque_path_tests {
+    use super::*;
+    use gpui::px;
+
+    #[test]
+    #[ignore = "requires a real macOS Metal device; run explicitly with --ignored"]
+    fn opaque_multiply_gpu_pixels_cover_union_order_alpha_and_edges() {
+        use gpui::{PlatformHeadlessRenderer, rgba};
+
+        fn triangle(colour: u32, multiply: bool, copies: usize) -> Path<ScaledPixels> {
+            let mut path = Path::new(point(px(4.25), px(4.25)));
+            for _ in 0..copies {
+                path.push_triangle(
+                    (
+                        point(px(4.25), px(4.25)),
+                        point(px(28.25), px(4.25)),
+                        point(px(4.25), px(28.25)),
+                    ),
+                    (point(0., 1.), point(0., 1.), point(0., 1.)),
+                );
+            }
+            path.content_mask.bounds = Bounds::new(point(px(0.), px(0.)), size(px(32.), px(32.)));
+            path.color = rgba(colour).into();
+            if multiply {
+                path = path.with_multiply_over_opaque();
+            }
+            path.scale(1.)
+        }
+
+        fn backdrop(colour: u32) -> Path<ScaledPixels> {
+            let mut path = Path::new(point(px(0.), px(0.)));
+            path.line_to(point(px(32.), px(0.)));
+            path.line_to(point(px(32.), px(32.)));
+            path.line_to(point(px(0.), px(32.)));
+            path.content_mask.bounds = Bounds::new(point(px(0.), px(0.)), size(px(32.), px(32.)));
+            path.color = rgba(colour).into();
+            path.scale(1.)
+        }
+
+        fn render(
+            renderer: &mut MetalHeadlessRenderer,
+            paths: Vec<Path<ScaledPixels>>,
+        ) -> image::RgbaImage {
+            let mut scene = Scene::default();
+            scene.insert_primitive(backdrop(0x3366ccff));
+            for path in paths {
+                scene.insert_primitive(path);
+            }
+            scene.finish();
+            renderer
+                .render_scene_to_image(&scene, size(DevicePixels(32), DevicePixels(32)))
+                .unwrap()
+        }
+
+        fn assert_pixel(image: &image::RgbaImage, expected: [u8; 4]) {
+            let actual = image.get_pixel(8, 8).0;
+            assert!(
+                actual.iter().zip(expected).all(|(a, e)| a.abs_diff(e) <= 2),
+                "{actual:?} != {expected:?}"
+            );
+        }
+
+        let mut renderer = MetalHeadlessRenderer::new();
+        let single = render(&mut renderer, vec![triangle(0xffff0080, true, 1)]);
+        assert_pixel(&single, [51, 102, 102, 255]);
+        let self_overlap = render(&mut renderer, vec![triangle(0xffff0080, true, 3)]);
+        assert_eq!(
+            single.as_raw(),
+            self_overlap.as_raw(),
+            "one path must union its own coverage, including antialiased edges"
+        );
+        let separate = render(
+            &mut renderer,
+            vec![triangle(0xffff0080, true, 1), triangle(0xffff0080, true, 1)],
+        );
+        assert_pixel(&separate, [51, 102, 51, 255]);
+        assert_pixel(
+            &render(&mut renderer, vec![triangle(0xffff0000, true, 1)]),
+            [51, 102, 204, 255],
+        );
+        assert_pixel(
+            &render(&mut renderer, vec![triangle(0xffff00ff, true, 1)]),
+            [51, 102, 0, 255],
+        );
+        assert_pixel(
+            &render(
+                &mut renderer,
+                vec![
+                    triangle(0xffff0080, true, 1),
+                    triangle(0xff0000ff, false, 1),
+                ],
+            ),
+            [255, 0, 0, 255],
+        );
+        assert_pixel(
+            &render(
+                &mut renderer,
+                vec![
+                    triangle(0xff0000ff, false, 1),
+                    triangle(0x00ffff80, true, 1),
+                ],
+            ),
+            [127, 0, 0, 255],
+        );
+        assert_eq!(single.get_pixel(0, 0).0, [51, 102, 204, 255]);
+        let edges: Vec<_> = single
+            .pixels()
+            .filter(|pixel| pixel[2] > 105 && pixel[2] < 200)
+            .collect();
+        assert!(
+            !edges.is_empty(),
+            "fixture must exercise fractional edge coverage"
+        );
+        for pixel in edges {
+            assert_eq!(pixel[0], 51);
+            assert_eq!(pixel[1], 102);
+            assert_eq!(pixel[3], 255);
+        }
+    }
+
+    #[test]
+    fn opaque_multiply_unions_self_intersection_coverage_once() {
+        assert_eq!(
+            path_rasterization_blend_operation(false),
+            metal::MTLBlendOperation::Add
+        );
+        let operation = path_rasterization_blend_operation(true);
+        assert_eq!(operation, metal::MTLBlendOperation::Max);
+        let source = [0.9_f64, 0.7, 0.1, 1.];
+        let opacity = 0.4;
+        let mut intermediate = [0_f64; 4];
+        for coverage in [0.25_f64, 1., 0.5, 1.] {
+            for channel in 0..4 {
+                let fragment = source[channel] * opacity * coverage;
+                intermediate[channel] = match operation {
+                    metal::MTLBlendOperation::Max => intermediate[channel].max(fragment),
+                    _ => panic!("self-intersections require maximum coverage"),
+                };
+            }
+        }
+        assert_eq!(intermediate, source.map(|channel| channel * opacity));
+    }
+
+    #[test]
+    fn opaque_multiply_pipeline_matches_reference_for_alpha_and_overlap() {
+        use metal::MTLBlendFactor::{DestinationColor, One, OneMinusSourceAlpha};
+        assert_eq!(
+            path_sprite_blend_factors(false),
+            (One, OneMinusSourceAlpha, One)
+        );
+        let factors = path_sprite_blend_factors(true);
+        assert_eq!(
+            factors,
+            (DestinationColor, OneMinusSourceAlpha, OneMinusSourceAlpha)
+        );
+        let factor = |blend, source_alpha: f64, destination: f64| match blend {
+            DestinationColor => destination,
+            One => 1.,
+            OneMinusSourceAlpha => 1. - source_alpha,
+            _ => panic!("unexpected path blend factor"),
+        };
+        // Evaluate the actual pipeline factors, with premultiplied intermediate
+        // pixels, against the independent opaque multiply equation.
+        for background in [[1., 1., 1.], [0.2, 0.4, 0.8], [0., 0., 0.]] {
+            for alpha in [0., 0.25, 0.7, 1.] {
+                let mut actual = background;
+                let mut expected = background;
+                for source in [[1., 0.8, 0.1], [0.2, 0.6, 1.]] {
+                    for channel in 0..3 {
+                        actual[channel] =
+                            source[channel] * alpha * factor(factors.0, alpha, actual[channel])
+                                + actual[channel] * factor(factors.1, alpha, actual[channel]);
+                        expected[channel] *= 1. - alpha + source[channel] * alpha;
+                        assert!((actual[channel] - expected[channel]).abs() < 1e-12);
+                    }
+                    assert_eq!(alpha + factor(factors.2, alpha, 1.), 1.);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn opaque_multiply_isolates_each_path_without_splitting_normal_runs() {
+        let paths: Vec<_> = [false, false, true, true, false, false, true]
+            .into_iter()
+            .enumerate()
+            .map(|(index, multiply)| {
+                let path = Path::new(point(px(index as f32), px(0.)));
+                (if multiply {
+                    path.with_multiply_over_opaque()
+                } else {
+                    path
+                })
+                .scale(1.)
+            })
+            .collect();
+        let runs: Vec<_> = path_composite_runs(&paths).collect();
+        assert_eq!(
+            runs.iter().map(|run| run.len()).collect::<Vec<_>>(),
+            [2, 1, 1, 2, 1]
+        );
+        let actual: Vec<_> = runs
+            .iter()
+            .flat_map(|run| run.iter())
+            .map(|path| path.bounds.origin.x)
+            .collect();
+        assert_eq!(
+            actual,
+            paths
+                .iter()
+                .map(|path| path.bounds.origin.x)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(path_composite_runs(&paths[..2]).count(), 1);
+        assert_eq!(path_composite_runs(&[]).count(), 0);
+    }
+}
+
+fn path_sprite_blend_factors(
+    multiply_over_opaque: bool,
+) -> (
+    metal::MTLBlendFactor,
+    metal::MTLBlendFactor,
+    metal::MTLBlendFactor,
+) {
+    use metal::MTLBlendFactor::{DestinationColor, One, OneMinusSourceAlpha};
+    if multiply_over_opaque {
+        (DestinationColor, OneMinusSourceAlpha, OneMinusSourceAlpha)
+    } else {
+        (One, OneMinusSourceAlpha, One)
+    }
+}
+
+fn path_rasterization_blend_operation(union_coverage: bool) -> metal::MTLBlendOperation {
+    if union_coverage {
+        metal::MTLBlendOperation::Max
+    } else {
+        metal::MTLBlendOperation::Add
     }
 }

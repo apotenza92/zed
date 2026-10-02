@@ -755,6 +755,7 @@ pub struct PolychromeSprite {
     pub content_mask: ContentMask<ScaledPixels>,
     pub corner_radii: Corners<ScaledPixels>,
     pub tile: AtlasTile,
+    pub transformation: TransformationMatrix,
 }
 
 impl From<PolychromeSprite> for Primitive {
@@ -796,6 +797,22 @@ pub struct Path<P: Clone + Debug + Default + PartialEq> {
     start: Point<P>,
     current: Point<P>,
     contour_count: usize,
+    #[cfg(target_os = "macos")]
+    multiply_over_opaque: bool,
+}
+
+#[cfg(target_os = "macos")]
+impl<P: Clone + Debug + Default + PartialEq> Path<P> {
+    /// Whether Metal must multiply this path over an already opaque backdrop.
+    ///
+    /// Panics if a marked path has a non-solid background.
+    pub fn multiplies_over_opaque(&self) -> bool {
+        assert!(
+            !self.multiply_over_opaque || self.color.tag == crate::color::BackgroundTag::Solid,
+            "opaque multiply paths require a solid background"
+        );
+        self.multiply_over_opaque
+    }
 }
 
 impl Path<Pixels> {
@@ -814,7 +831,23 @@ impl Path<Pixels> {
             content_mask: Default::default(),
             color: Default::default(),
             contour_count: 0,
+            #[cfg(target_os = "macos")]
+            multiply_over_opaque: false,
         }
+    }
+
+    /// Multiply this path over an already opaque backdrop in the Metal renderer.
+    ///
+    /// Every covered pixel must already have destination alpha 1. This is not
+    /// general multiply compositing over a transparent surface. Each marked path
+    /// composites separately, including when consecutive paths overlap. Within
+    /// a path, triangle coverage is unioned, so joints/self-intersections receive
+    /// opacity once. The colour supplied to `Window::paint_path` must be solid;
+    /// rendering a marked path with a gradient or pattern panics.
+    #[cfg(target_os = "macos")]
+    pub fn with_multiply_over_opaque(mut self) -> Self {
+        self.multiply_over_opaque = true;
+        self
     }
 
     /// Scale this path by the given factor.
@@ -832,6 +865,8 @@ impl Path<Pixels> {
             start: self.start.map(|start| start.scale(factor)),
             current: self.current.scale(factor),
             contour_count: self.contour_count,
+            #[cfg(target_os = "macos")]
+            multiply_over_opaque: self.multiply_over_opaque,
             color: self.color,
         }
     }
@@ -945,5 +980,39 @@ impl PathVertex<Pixels> {
             st_position: self.st_position,
             content_mask: self.content_mask.scale(factor),
         }
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod opaque_path_tests {
+    use super::*;
+    use crate::{px, size};
+
+    #[test]
+    #[should_panic(expected = "opaque multiply paths require a solid background")]
+    fn opaque_multiply_rejects_non_solid_background() {
+        let mut path = Path::new(point(px(0.), px(0.))).with_multiply_over_opaque();
+        path.color.tag = crate::color::BackgroundTag::LinearGradient;
+        path.scale(2.).multiplies_over_opaque();
+    }
+
+    #[test]
+    fn opaque_multiply_survives_scaling_and_scene_insertion() {
+        let mut path = Path::new(point(px(2.), px(3.))).with_multiply_over_opaque();
+        path.line_to(point(px(12.), px(3.)));
+        path.line_to(point(px(12.), px(13.)));
+        path.content_mask.bounds = Bounds::new(point(px(0.), px(0.)), size(px(20.), px(20.)));
+        let scaled = path.scale(2.);
+        assert!(scaled.multiplies_over_opaque());
+        assert_eq!(scaled.bounds, path.bounds.scale(2.));
+        let mut scene = Scene::default();
+        scene.insert_primitive(scaled);
+        assert_eq!(scene.paths.len(), 1);
+        assert!(scene.paths[0].multiplies_over_opaque());
+        assert!(
+            !Path::new(point(px(0.), px(0.)))
+                .scale(2.)
+                .multiplies_over_opaque()
+        );
     }
 }

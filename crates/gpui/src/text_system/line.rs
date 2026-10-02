@@ -1,7 +1,7 @@
 use crate::{
     App, Bounds, DevicePixels, Half, Hsla, LineLayout, Pixels, Point, RenderGlyphParams, Result,
-    ShapedGlyph, ShapedRun, SharedString, StrikethroughStyle, TextAlign, UnderlineStyle, Window,
-    WrapBoundary, WrappedLineLayout, black, fill, point, px, size,
+    ShapedGlyph, ShapedRun, SharedString, StrikethroughStyle, TextAlign, TransformationMatrix,
+    UnderlineStyle, Window, WrapBoundary, WrappedLineLayout, black, fill, point, px, size,
 };
 use derive_more::{Deref, DerefMut};
 use smallvec::SmallVec;
@@ -97,11 +97,49 @@ impl ShapedLine {
             align_width,
             &self.decoration_runs,
             &[],
+            TransformationMatrix::unit(),
             window,
             cx,
         )?;
 
         Ok(())
+    }
+
+    /// Paint the glyph sprites in this line with a device-pixel transformation.
+    ///
+    /// Text shaping and alignment remain in the line's untransformed coordinate space. Text
+    /// decorations are intentionally not transformed; callers that use this API should supply
+    /// runs without backgrounds, underlines, or strikethroughs.
+    pub fn paint_transformed(
+        &self,
+        origin: Point<Pixels>,
+        line_height: Pixels,
+        align: TextAlign,
+        align_width: Option<Pixels>,
+        transformation: TransformationMatrix,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.decoration_runs
+                .iter()
+                .all(|run| run.background_color.is_none()
+                    && run.underline.is_none()
+                    && run.strikethrough.is_none()),
+            "transformed shaped lines do not support text decoration geometry"
+        );
+        paint_line(
+            origin,
+            &self.layout,
+            line_height,
+            align,
+            align_width,
+            &self.decoration_runs,
+            &[],
+            transformation,
+            window,
+            cx,
+        )
     }
 
     /// Paint the background of the line to the window.
@@ -293,6 +331,7 @@ impl WrappedLine {
             align_width,
             &self.decoration_runs,
             &self.wrap_boundaries,
+            TransformationMatrix::unit(),
             window,
             cx,
         )?;
@@ -339,6 +378,7 @@ fn paint_line(
     align_width: Option<Pixels>,
     decoration_runs: &[DecorationRun],
     wrap_boundaries: &[WrapBoundary],
+    transformation: TransformationMatrix,
     window: &mut Window,
     cx: &mut App,
 ) -> Result<()> {
@@ -349,7 +389,14 @@ fn paint_line(
             line_height * (wrap_boundaries.len() as f32 + 1.),
         ),
     );
-    window.paint_layer(line_bounds, |window| {
+    let layer_bounds = if transformation == TransformationMatrix::unit() {
+        line_bounds
+    } else {
+        // The matrix is expressed in device pixels, so the untransformed logical bounds are not a
+        // safe layer bound. Clipping remains exact in the transformed sprite shader.
+        window.content_mask().bounds
+    };
+    window.paint_layer(layer_bounds, |window| {
         let padding_top = (line_height - layout.ascent - layout.descent) / 2.;
         let baseline_offset = point(px(0.), padding_top + layout.ascent);
         let mut decoration_runs = decoration_runs.iter();
@@ -522,22 +569,26 @@ fn paint_line(
                 };
 
                 let content_mask = window.content_mask();
-                if max_glyph_bounds.intersects(&content_mask.bounds) {
+                if transformation != TransformationMatrix::unit()
+                    || max_glyph_bounds.intersects(&content_mask.bounds)
+                {
                     let vertical_offset = point(px(0.0), glyph.position.y);
                     if glyph.is_emoji {
-                        window.paint_emoji(
+                        window.paint_emoji_transformed(
                             glyph_origin + baseline_offset + vertical_offset,
                             run.font_id,
                             glyph.id,
                             layout.font_size,
+                            transformation,
                         )?;
                     } else {
-                        window.paint_glyph(
+                        window.paint_glyph_transformed(
                             glyph_origin + baseline_offset + vertical_offset,
                             run.font_id,
                             glyph.id,
                             layout.font_size,
                             color,
+                            transformation,
                         )?;
                     }
                 }

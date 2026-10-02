@@ -1255,6 +1255,28 @@ fn file_open_dialog(
             folder_dialog.SetOkButtonLabel(&HSTRING::from(prompt))?;
         }
 
+        if let Some(extensions) = options.allowed_extensions.as_ref() {
+            let name = HSTRING::from(format!(
+                "{} files",
+                extensions
+                    .iter()
+                    .map(|extension| extension.to_uppercase())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+            let spec = HSTRING::from(
+                extensions
+                    .iter()
+                    .map(|extension| format!("*.{extension}"))
+                    .collect::<Vec<_>>()
+                    .join(";"),
+            );
+            folder_dialog.SetFileTypes(&[Common::COMDLG_FILTERSPEC {
+                pszName: windows::core::PCWSTR(name.as_ptr()),
+                pszSpec: windows::core::PCWSTR(spec.as_ptr()),
+            }])?;
+        }
+
         if folder_dialog.Show(window).is_err() {
             // User cancelled
             return Ok(None);

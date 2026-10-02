@@ -803,6 +803,14 @@ pub enum TextInputStateChange {
 #[expect(missing_docs)]
 pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn bounds(&self) -> Bounds<Pixels>;
+    /// Moves the window so its frame origin is `origin`, in the coordinates
+    /// [`Self::bounds`] reports. Platforms that cannot position windows
+    /// (Wayland) leave it in place.
+    fn set_origin(&self, _origin: Point<Pixels>) {}
+    /// Whether [`Self::set_origin`] can move this window.
+    fn can_set_origin(&self) -> bool {
+        false
+    }
     fn is_maximized(&self) -> bool;
     fn window_bounds(&self) -> WindowBounds;
     fn content_size(&self) -> Size<Pixels>;
@@ -2111,6 +2119,8 @@ pub struct PathPromptOptions {
     pub multiple: bool,
     /// The prompt to show to a user when selecting a path
     pub prompt: Option<SharedString>,
+    /// Restrict selectable files to these extensions (without the dot).
+    pub allowed_extensions: Option<Vec<SharedString>>,
 }
 
 /// What kind of prompt styling to show
