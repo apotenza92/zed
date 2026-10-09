@@ -2147,6 +2147,77 @@ extern "C" fn dealloc_view(this: &Object, _: Sel) {
     }
 }
 
+/// The NSCursor for an application-drawn cursor, built once from its rasters.
+/// Falls back to the arrow if the image is unknown or has no rasters.
+unsafe fn image_cursor(image_id: gpui::CursorImageId) -> id {
+    thread_local! {
+        static CURSORS: std::cell::RefCell<std::collections::HashMap<gpui::CursorImageId, usize>> =
+            Default::default();
+    }
+    if let Some(cursor) = CURSORS.with(|cursors| cursors.borrow().get(&image_id).copied()) {
+        return cursor as id;
+    }
+    unsafe {
+        let arrow: id = msg_send![class!(NSCursor), arrowCursor];
+        let Some(image) = gpui::cursor_image(image_id) else {
+            return arrow;
+        };
+        if image.rasters.is_empty() {
+            return arrow;
+        }
+        let size = NSSize::new(
+            f64::from(f32::from(image.size.width)),
+            f64::from(f32::from(image.size.height)),
+        );
+        let ns_image: id = msg_send![class!(NSImage), alloc];
+        let ns_image: id = msg_send![ns_image, initWithSize: size];
+        for raster in &image.rasters {
+            let (width, height) = (raster.width as NSInteger, raster.height as NSInteger);
+            if raster.rgba.len() != (raster.width * raster.height * 4) as usize {
+                continue;
+            }
+            let rep: id = msg_send![class!(NSBitmapImageRep), alloc];
+            let color_space = NSString::alloc(nil).init_str("NSDeviceRGBColorSpace");
+            // NSBitmapFormatAlphaNonpremultiplied
+            let format: NSUInteger = 1 << 1;
+            let rep: id = msg_send![rep,
+                initWithBitmapDataPlanes: std::ptr::null_mut::<*mut u8>()
+                pixelsWide: width
+                pixelsHigh: height
+                bitsPerSample: 8 as NSInteger
+                samplesPerPixel: 4 as NSInteger
+                hasAlpha: YES
+                isPlanar: NO
+                colorSpaceName: color_space
+                bitmapFormat: format
+                bytesPerRow: width * 4
+                bitsPerPixel: 32 as NSInteger
+            ];
+            let _: () = msg_send![color_space, release];
+            if rep.is_null() {
+                continue;
+            }
+            let data: *mut u8 = msg_send![rep, bitmapData];
+            std::ptr::copy_nonoverlapping(raster.rgba.as_ptr(), data, raster.rgba.len());
+            let _: () = msg_send![rep, setSize: size];
+            let _: () = msg_send![ns_image, addRepresentation: rep];
+            let _: () = msg_send![rep, release];
+        }
+        let hot_spot = NSPoint::new(
+            f64::from(f32::from(image.hot_spot.x)),
+            f64::from(f32::from(image.hot_spot.y)),
+        );
+        let cursor: id = msg_send![class!(NSCursor), alloc];
+        let cursor: id = msg_send![cursor, initWithImage: ns_image hotSpot: hot_spot];
+        let _: () = msg_send![ns_image, release];
+        if cursor.is_null() {
+            return arrow;
+        }
+        CURSORS.with(|cursors| cursors.borrow_mut().insert(image_id, cursor as usize));
+        cursor
+    }
+}
+
 extern "C" fn reset_cursor_rects(this: &Object, _: Sel) {
     // SAFETY: AppKit invokes cursor-rect updates on the main thread for GPUIView instances,
     // whose WINDOW_STATE_IVAR is initialized when the view is created. The cursor registered
@@ -2191,6 +2262,7 @@ extern "C" fn reset_cursor_rects(this: &Object, _: Sel) {
             CursorStyle::DragLink => msg_send![class!(NSCursor), dragLinkCursor],
             CursorStyle::DragCopy => msg_send![class!(NSCursor), dragCopyCursor],
             CursorStyle::ContextualMenu => msg_send![class!(NSCursor), contextualMenuCursor],
+            CursorStyle::Image(image) => image_cursor(image),
         };
 
         let bounds = NSView::bounds(this as *const Object as id);

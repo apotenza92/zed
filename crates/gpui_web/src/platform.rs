@@ -506,7 +506,8 @@ impl Platform for WebPlatform {
     }
 
     fn set_cursor_style(&self, style: CursorStyle) {
-        let css_cursor = match style {
+        // Application-drawn cursors show their standard fallback here.
+        let css_cursor = match style.standard() {
             CursorStyle::Arrow => "default",
             CursorStyle::IBeam => "text",
             CursorStyle::Crosshair => "crosshair",
@@ -528,6 +529,7 @@ impl Platform for WebPlatform {
             CursorStyle::DragLink => "alias",
             CursorStyle::DragCopy => "copy",
             CursorStyle::ContextualMenu => "context-menu",
+            CursorStyle::Image(_) => "default",
         };
 
         self.last_cursor_css.set(css_cursor);

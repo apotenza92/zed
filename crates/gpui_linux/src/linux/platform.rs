@@ -915,7 +915,8 @@ pub(super) const DEFAULT_CURSOR_ICON_NAME: &str = "left_ptr";
 pub(super) fn cursor_style_to_icon_names(style: CursorStyle) -> &'static [&'static str] {
     // Based on cursor names from chromium:
     // https://github.com/chromium/chromium/blob/d3069cf9c973dc3627fa75f64085c6a86c8f41bf/ui/base/cursor/cursor_factory.cc#L113
-    match style {
+    // Application-drawn cursors show their standard fallback here.
+    match style.standard() {
         CursorStyle::Arrow => &[DEFAULT_CURSOR_ICON_NAME],
         CursorStyle::IBeam => &["text", "xterm"],
         CursorStyle::Crosshair => &["crosshair", "cross"],
@@ -937,6 +938,7 @@ pub(super) fn cursor_style_to_icon_names(style: CursorStyle) -> &'static [&'stat
         CursorStyle::DragLink => &["alias"],
         CursorStyle::DragCopy => &["copy"],
         CursorStyle::ContextualMenu => &["context-menu"],
+        CursorStyle::Image(_) => &[DEFAULT_CURSOR_ICON_NAME],
     }
 }
 

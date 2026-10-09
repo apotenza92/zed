@@ -16,7 +16,8 @@ use wayland_protocols::wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::
 use gpui::CursorStyle;
 
 pub(super) fn to_shape(style: CursorStyle) -> Shape {
-    match style {
+    // Application-drawn cursors show their standard fallback here.
+    match style.standard() {
         CursorStyle::Arrow => Shape::Default,
         CursorStyle::IBeam => Shape::Text,
         CursorStyle::Crosshair => Shape::Crosshair,
@@ -38,5 +39,6 @@ pub(super) fn to_shape(style: CursorStyle) -> Shape {
         CursorStyle::DragLink => Shape::Alias,
         CursorStyle::DragCopy => Shape::Copy,
         CursorStyle::ContextualMenu => Shape::ContextMenu,
+        CursorStyle::Image(_) => Shape::Default,
     }
 }

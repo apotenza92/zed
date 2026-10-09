@@ -2275,6 +2275,88 @@ pub enum CursorStyle {
     /// A cursor indicating that the operation will result in a context menu
     /// corresponds to the CSS cursor value `context-menu`
     ContextualMenu,
+
+    /// An application-drawn cursor registered with [`register_cursor_image`].
+    /// Platforms that cannot show it use the image's fallback.
+    Image(CursorImageId),
+}
+
+impl CursorStyle {
+    /// This style, or for an application-drawn cursor its fallback, so the
+    /// result is always one of the standard cursors.
+    pub fn standard(self) -> Self {
+        match self {
+            CursorStyle::Image(id) => {
+                cursor_image(id).map_or(CursorStyle::Arrow, |image| image.fallback)
+            }
+            style => style,
+        }
+    }
+}
+
+/// Identifies a cursor image registered with [`register_cursor_image`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub struct CursorImageId(u32);
+
+/// One rendering of a [`CursorImage`] for a display scale factor.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CursorRaster {
+    /// The display scale factor this raster is drawn for.
+    pub scale: f32,
+    /// Width in device pixels.
+    pub width: u32,
+    /// Height in device pixels.
+    pub height: u32,
+    /// Row-major RGBA, eight bits per channel, not premultiplied.
+    pub rgba: Vec<u8>,
+}
+
+/// An application-drawn cursor.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CursorImage {
+    /// The cursor's size in logical pixels.
+    pub size: Size<Pixels>,
+    /// The point within the image that the pointer position refers to.
+    pub hot_spot: Point<Pixels>,
+    /// Renderings at one or more scale factors.
+    pub rasters: Vec<CursorRaster>,
+    /// The standard cursor used where application cursors are unsupported.
+    pub fallback: CursorStyle,
+}
+
+impl CursorImage {
+    /// The raster to show at `scale`: the smallest one drawn for at least
+    /// that scale, otherwise the largest.
+    pub fn raster_for_scale(&self, scale: f32) -> Option<&CursorRaster> {
+        self.rasters
+            .iter()
+            .filter(|raster| raster.scale >= scale)
+            .min_by(|a, b| a.scale.total_cmp(&b.scale))
+            .or_else(|| {
+                self.rasters
+                    .iter()
+                    .max_by(|a, b| a.scale.total_cmp(&b.scale))
+            })
+    }
+}
+
+static CURSOR_IMAGES: parking_lot::RwLock<Vec<std::sync::Arc<CursorImage>>> =
+    parking_lot::RwLock::new(Vec::new());
+
+/// Registers an application-drawn cursor for use as [`CursorStyle::Image`].
+/// Images live for the rest of the process; register each one once.
+pub fn register_cursor_image(mut image: CursorImage) -> CursorImageId {
+    if matches!(image.fallback, CursorStyle::Image(_)) {
+        image.fallback = CursorStyle::Arrow;
+    }
+    let mut images = CURSOR_IMAGES.write();
+    images.push(std::sync::Arc::new(image));
+    CursorImageId((images.len() - 1) as u32)
+}
+
+/// The image registered as `id`.
+pub fn cursor_image(id: CursorImageId) -> Option<std::sync::Arc<CursorImage>> {
+    CURSOR_IMAGES.read().get(id.0 as usize).cloned()
 }
 
 /// A clipboard item that should be copied to the clipboard
