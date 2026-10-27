@@ -1323,6 +1323,13 @@ fn file_save_dialog(
         };
     }
 
+    let extension = suggested_name
+        .as_deref()
+        .and_then(|name| Path::new(name).extension())
+        .and_then(|extension| extension.to_str())
+        .filter(|extension| !extension.is_empty())
+        .map(str::to_owned);
+
     if let Some(suggested_name) = suggested_name {
         unsafe {
             dialog
@@ -1332,11 +1339,37 @@ fn file_save_dialog(
         };
     }
 
+    // Offer the suggested name's type first, as macOS keeps its extension, so
+    // a name typed without one still gets it instead of saving bare.
+    let typed_filter = extension.as_ref().map(|extension| {
+        (
+            HSTRING::from(format!(
+                "{} files (*.{extension})",
+                extension.to_uppercase()
+            )),
+            HSTRING::from(format!("*.{extension}")),
+        )
+    });
+    let mut file_types = Vec::with_capacity(2);
+    if let Some((name, spec)) = typed_filter.as_ref() {
+        file_types.push(Common::COMDLG_FILTERSPEC {
+            pszName: windows::core::PCWSTR(name.as_ptr()),
+            pszSpec: windows::core::PCWSTR(spec.as_ptr()),
+        });
+    }
+    file_types.push(Common::COMDLG_FILTERSPEC {
+        pszName: windows::core::w!("All files"),
+        pszSpec: windows::core::w!("*.*"),
+    });
+
     unsafe {
-        dialog.SetFileTypes(&[Common::COMDLG_FILTERSPEC {
-            pszName: windows::core::w!("All files"),
-            pszSpec: windows::core::w!("*.*"),
-        }])?;
+        dialog.SetFileTypes(&file_types)?;
+        if let Some(extension) = extension.as_deref() {
+            dialog
+                .SetDefaultExtension(&HSTRING::from(extension))
+                .context("failed to set default extension")
+                .log_err();
+        }
         if dialog.Show(window).is_err() {
             // User cancelled
             return Ok(None);
